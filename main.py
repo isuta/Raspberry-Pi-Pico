@@ -1,3 +1,4 @@
+from machine import Pin
 import time
 import random
 from modules.oled_controller import OledController
@@ -11,6 +12,7 @@ no1_play = bytearray([0x7E, 0xFF, 0x06, 0x03, 0x00, 0x00, 0x01, 0xEF])
 
 # GP24ピンを、入力用のプルダウン抵抗を使用するピンとして設定。
 button = machine.Pin(24,machine.Pin.IN,machine.Pin.PULL_DOWN)
+button.irq(trigger=Pin.IRQ_RISING, handler=button_pressed)
 
 # GPIO0をLED出力ピンとして設定
 led = machine.Pin(0, machine.Pin.OUT)
@@ -18,11 +20,11 @@ led = machine.Pin(0, machine.Pin.OUT)
 # 抽選配列を定義 TODO 抽選用テーブルの配列にする
 my_array = [1, 2, 3, 4, 5]
 
-# ボタンの状態管理
-button_previous = True  # 初期状態（ボタンが押されていない）
-last_play_time = 0      # 最後に音声を再生した時間（タイマー管理）
-is_playing = False      # 再生中フラグ
+# ボタンの設定
+def button_pressed(pin):
+    randomPlay()
 
+# TODO 必要か確認する
 # 初期待ち
 time.sleep(2.0)
 
@@ -88,34 +90,11 @@ oled_controller.showDisplay('loading now', draw_type)
 time.sleep(5)  # 少し待機
 oled_controller.showTitle()
 
-
-# ボタン入力待ちループ
+# スリープと割り込み待機
 while True:
-    button_current = button.value()  # 現在のボタン状態を取得（押されるとHIGH: 1）
-    #print(button_current) #確認用
+    # タイトルを描画
+    oled_controller.showTitle()
+    lightsleep()
 
-    # ボタンが押されている間はLEDを点灯
-    if button_current == 1:  # ボタンが押された場合
-        led.value(1)
-    else:
-        led.value(0)
-
-    # ボタンが「押された瞬間」を検知
-    if button_previous == 1 and button_current == 1:  # 前回LOWで今回HIGHなら「押された」
-        current_time = time.ticks_ms()
-        if time.ticks_diff(current_time, last_play_time) >= 5000:  # 5秒以上経過した場合のみ再生
-            randomPlay()
-            last_play_time = current_time  # 最後の再生時間を更新
-            is_playing = True             # 再生中フラグをセット
-
-    # 再生中かつ5秒経過後にタイトル再描画
-    if is_playing:
-        current_time = time.ticks_ms()
-        if time.ticks_diff(current_time, last_play_time) >= 5000:  # 5秒経過チェック
-            oled_controller.showTitle()       # タイトルを再描画
-            is_playing = False  # 再生中フラグをリセット
-
-    # 現在のボタン状態を次回の比較用に保存
-    button_previous = button_current
-
-    time.sleep(0.01)  # 10ms待機（チャタリング防止）
+    # TODO 必要か確認する
+    # time.sleep(0.01)  # 10ms待機（チャタリング防止）
