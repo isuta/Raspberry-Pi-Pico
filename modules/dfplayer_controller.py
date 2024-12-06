@@ -12,7 +12,7 @@ uart = machine.UART(0, baudrate=9600, tx=machine.Pin(16), rx=machine.Pin(17))
 startup_sound = bytearray([0x7E, 0xFF, 0x06, 0x03, 0x00, 0x02, 0x01, 0xEF])
 no1_play = bytearray([0x7E, 0xFF, 0x06, 0x03, 0x00, 0x00, 0x01, 0xEF])
 
-class OledController:
+class DfPlayerController:
     # DfPlayerの初期化
     def initDfplayer() :
         # 描画タイプ 0:何もなし 1:丸 2:バツ
