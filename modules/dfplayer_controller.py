@@ -46,6 +46,16 @@ class OledController:
 
         return int(select_file_number)
 
+    def getTrackLength():
+        # 応答を読み取る
+        if uart.any():
+            response = uart.read(10)
+            if response and len(response) == 10:
+                # 応答からトラックの長さを抽出（秒単位）
+                track_length = response[6] * 256 + response[7]
+                return track_length
+        return 0
+
     # ランダムに曲を再生する
     def randomPlay() :
         # ランダムなファイル番号を取得
@@ -64,7 +74,11 @@ class OledController:
         # 音声再生
         uart.write(play_sound)
 
+        # 再生時間を取得
+        play_time = getTrackLength(play_sound)
+
         return {
             'message': 'select file ' + str(num),
-            'draw_type': draw_type
+            'draw_type': draw_type,
+            'play_time': play_time
         }
