@@ -2,8 +2,14 @@ from machine import Pin
 import time
 import random
 
-# 抽選配列を定義 TODO 抽選用テーブルの配列にする
-my_array = [1, 2, 3, 4, 5]
+# 抽選配列を定義 TODO 再生時間をlengthに設定、descriptionにファイルの説明を記する
+y_array = [
+    {"id": 1, "length": 120, "description": "Track 1"},
+    {"id": 2, "length": 150, "description": "Track 2"},
+    {"id": 3, "length": 180, "description": "Track 3"},
+    {"id": 4, "length": 210, "description": "Track 4"},
+    {"id": 5, "length": 240, "description": "Track 5"}
+]
 
 # 設定
 uart = machine.UART(0, baudrate=9600, tx=machine.Pin(16), rx=machine.Pin(17))
@@ -40,21 +46,10 @@ class DfPlayerController:
 
     # 抽選配列からランダムに取得した数値(ファイル番号)を返す
     def randomSelect():
-        num = random.randint(0, 4)
+        num = random.randint(0, len(my_array) - 1)
         print('select array num ' + str(num))
-        select_file_number = my_array[num]
-
-        return int(select_file_number)
-
-    def getTrackLength():
-        # 応答を読み取る
-        if uart.any():
-            response = uart.read(10)
-            if response and len(response) == 10:
-                # 応答からトラックの長さを抽出（秒単位）
-                track_length = response[6] * 256 + response[7]
-                return track_length
-        return 0
+        selected = my_array[num]["id"]
+        return int(selected)
 
     # ランダムに曲を再生する
     def randomPlay() :
@@ -75,7 +70,7 @@ class DfPlayerController:
         uart.write(play_sound)
 
         # 再生時間を取得
-        play_time = getTrackLength(play_sound)
+        play_time = my_array[num]["length"]
 
         return {
             'message': 'select file ' + str(num),
