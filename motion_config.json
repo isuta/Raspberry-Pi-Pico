@@ -1,0 +1,34 @@
+{
+    "motor_config": {
+        "steps_per_revolution": 4096,
+        "gear_ratio": 1
+    },
+    "sequences": [
+        {
+            "name": "初期位置合わせ",
+            "type": "steps",
+            "steps": 100,
+            "speed": "NORMAL",
+            "direction": 1
+        },
+        {
+            "name": "待機",
+            "type": "wait",
+            "wait_ms": 500
+        },
+        {
+            "name": "90度回転",
+            "type": "degrees",
+            "degrees": 90,
+            "speed": "SLOW",
+            "direction": -1
+        },
+        {
+            "name": "1.5回転",
+            "type": "rotations",
+            "rotations": 1.5,
+            "speed": 5,
+            "direction": 1
+        }
+    ]
+}
