@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pico W BLE LED制御テスト</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f4f7f9; }
+        /* スライダーを大きく、操作しやすくする */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 12px;
+            background: #d1d5db;
+            border-radius: 6px;
+            outline: none;
+            opacity: 0.9;
+            transition: opacity .15s ease-in-out;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: #2563eb;
+            cursor: pointer;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8 flex items-center justify-center min-h-screen">
+    <div id="app" class="w-full max-w-lg bg-white p-6 md:p-8 rounded-xl shadow-2xl border border-gray-100">
+        <h1 class="text-3xl font-extrabold text-gray-800 mb-2">Pico W BLE 制御テスト</h1>
+        <p class="text-sm text-gray-500 mb-6">Web Bluetooth APIを使用してPico WのLEDを制御します。（モーター制御の準備）</p>
+
+        <!-- 接続状態表示 -->
+        <div id="status-card" class="p-4 rounded-lg mb-6 shadow-inner bg-gray-50">
+            <p class="font-semibold text-lg text-gray-700">状態:</p>
+            <p id="connection-status" class="text-red-500 font-bold">未接続</p>
+        </div>
+
+        <!-- 制御パネル -->
+        <div id="control-panel" class="hidden">
+            <div class="mb-8">
+                <label for="led-slider" class="block text-lg font-medium text-gray-700 mb-3">
+                    LED出力 (PWMデューティ比): <span id="slider-value" class="font-bold text-indigo-600">0</span>
+                </label>
+                <input type="range" id="led-slider" min="0" max="100" value="0" class="w-full h-3">
+            </div>
+
+            <button id="disconnect-button" class="w-full bg-red-500 hover:bg-red-600 text-white font-semibold py-3 px-4 rounded-lg transition duration-150 shadow-md">
+                切断
+            </button>
+        </div>
+
+        <!-- 接続ボタン -->
+        <button id="connect-button" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg transition duration-150 shadow-lg active:shadow-none">
+            Pico W に接続
+        </button>
+
+        <!-- 注意書き -->
+        <div class="mt-8 p-4 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-800 rounded-md">
+            <p class="font-bold mb-2">💡 動作前の重要な手順 (Pico W側の準備)</p>
+            <p class="text-sm space-y-2">
+                このWebページを動作させるには、Raspberry Pi Pico WにMicroPythonで**BLEサーバー**のコードを書き込む必要があります。<br>
+                <span class="font-semibold">使用するUUIDは以下の通りです:</span><br>
+                - サービスUUID: `0000181A-0000-1000-8000-00805F9B34FB` <br>
+                - 特性UUID: `00002A57-0000-1000-8000-00805F9B34FB` 
+            </p>
+        </div>
+    </div>
+
+    <script>
+        // UUIDs for the custom BLE Service and Characteristic
+        // Note: These UUIDs are chosen to satisfy common Web Bluetooth API requirements but are used here for custom control.
+        const SERVICE_UUID = '0000181a-0000-1000-8000-00805f9b34fb'; // Generic Sensor Service
+        const CHARACTERISTIC_UUID = '00002a57-0000-1000-8000-00805f9b34fb'; // Heart Rate Measurement
+
+        // UI Elements
+        const connectButton = document.getElementById('connect-button');
+        const disconnectButton = document.getElementById('disconnect-button');
+        const statusElement = document.getElementById('connection-status');
+        const controlPanel = document.getElementById('control-panel');
+        const ledSlider = document.getElementById('led-slider');
+        const sliderValueDisplay = document.getElementById('slider-value');
+
+        // BLE Objects
+        let device = null;
+        let controlCharacteristic = null;
+
+        // --- UI State Management ---
+
+        function updateUI(isConnected) {
+            if (isConnected) {
+                statusElement.textContent = `接続中: ${device.name}`;
+                statusElement.classList.remove('text-red-500', 'text-yellow-500');
+                statusElement.classList.add('text-green-600');
+                connectButton.classList.add('hidden');
+                controlPanel.classList.remove('hidden');
+            } else {
+                statusElement.textContent = '未接続';
+                statusElement.classList.remove('text-green-600', 'text-yellow-500');
+                statusElement.classList.add('text-red-500');
+                connectButton.classList.remove('hidden');
+                controlPanel.classList.add('hidden');
+            }
+        }
+
+        // --- BLE Communication Functions ---
+
+        async function connectBLE() {
+            if (!navigator.bluetooth) {
+                alert("エラー: お使いのブラウザはWeb Bluetooth APIに対応していません。Chrome、Edgeなどをご利用ください。");
+                return;
+            }
+
+            statusElement.textContent = 'デバイスを検索中...';
+            statusElement.classList.remove('text-red-500');
+            statusElement.classList.add('text-yellow-500');
+
+            try {
+                // 1. デバイスの検索と接続
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: [SERVICE_UUID] }],
+                    optionalServices: [SERVICE_UUID]
+                });
+
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+
+                const server = await device.gatt.connect();
+
+                // 2. サービスの取得
+                const service = await server.getPrimaryService(SERVICE_UUID);
+
+                // 3. 特性の取得
+                controlCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+                updateUI(true);
+                console.log("BLE接続成功。特性の準備完了。");
+
+                // スライダーを操作する
+                handleSliderChange();
+
+            } catch (error) {
+                console.error('BLE接続エラー:', error);
+                alert(`接続に失敗しました: ${error.message}`);
+                updateUI(false);
+            }
+        }
+
+        function onDisconnected(event) {
+            const disconnectedDevice = event.target;
+            console.log(`デバイス ${disconnectedDevice.name} が切断されました。`);
+            updateUI(false);
+            controlCharacteristic = null;
+            device = null;
+        }
+
+        async function disconnectBLE() {
+            if (device && device.gatt.connected) {
+                await device.gatt.disconnect();
+            }
+            updateUI(false);
+        }
+
+        // --- Control Logic ---
+
+        async function handleSliderChange() {
+            const value = parseInt(ledSlider.value, 10);
+            sliderValueDisplay.textContent = value;
+
+            if (controlCharacteristic) {
+                try {
+                    // 1バイトのUint8Arrayとして値を書き込む (0-100)
+                    const data = new Uint8Array([value]);
+                    await controlCharacteristic.writeValue(data.buffer);
+                    // console.log(`Value written: ${value}`);
+                } catch (error) {
+                    console.error('特性への書き込みエラー:', error);
+                    // 接続が切れた場合は自動切断を促す
+                    if (error.message.includes("GATT server is disconnected")) {
+                        onDisconnected({ target: device });
+                    }
+                }
+            }
+        }
+
+        // --- Event Listeners ---
+        connectButton.addEventListener('click', connectBLE);
+        disconnectButton.addEventListener('click', disconnectBLE);
+
+        // スライダーの入力イベント（連続的な変化）とチェンジイベント（終了時の確定）
+        ledSlider.addEventListener('input', handleSliderChange);
+
+        // 初期UI設定
+        updateUI(false);
+
+    </script>
+    
+    <!-- 
+        ============================================================
+        PICO W (MicroPython) 側で必要なコード (抜粋)
+        ============================================================
+        
+        以下のコードをPico Wに書き込むことで、上記のWebページと通信できます。
+        （このファイル自体はJavaScriptなので、この部分は実行されません）
+
+        import bluetooth
+        import machine
+        import struct
+        import time
+        from micropython import const
+
+        # BLE UUIDs (Web側と一致させる必要があります)
+        _SVC_UUID = bluetooth.UUID(0x181A)  # Generic Sensor Service
+        _CHAR_UUID = bluetooth.UUID(0x2A57) # Heart Rate Measurement (カスタム利用)
+
+        # BLEフラグ (Write without response, Write) を設定
+        _FLAG_WRITE = const(0x08 | 0x04)
+
+        # GATT構造: (特性UUID, フラグ, ハンドラ)
+        _GATT_DEF = (
+            (
+                _SVC_UUID,
+                ((_CHAR_UUID, _FLAG_WRITE, lambda conn_handle, attr_handle, data: handle_write(data)),),
+            ),
+        )
+
+        # LEDのPWM設定
+        led_pin = machine.Pin('LED', machine.Pin.OUT)
+        pwm = machine.PWM(led_pin)
+        pwm.freq(1000) # PWM周波数 1kHz
+
+        def handle_write(data):
+            # 受信したデータを整数として解釈 (通常1バイト)
+            if data and len(data) == 1:
+                # 0-100の値を受け取る
+                duty_value = struct.unpack('<B', data)[0] 
+                
+                # PWMのデューティ比を設定 (MicroPythonでは0-65535)
+                # 65535 * (duty_value / 100)
+                pwm_duty = int((duty_value / 100) * 65535)
+                pwm.duty_u16(pwm_duty)
+                print(f"LED Duty: {duty_value}% ({pwm_duty})")
+            
+        # BLE初期化、アドバタイズ開始... (中略)
+
+        # メインループでBLEを処理... (中略)
+    -->
+</body>
+</html>
