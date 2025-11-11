@@ -1,14 +1,35 @@
 import network
 import socket
 import time
-from machine import Pin
+from machine import Pin, PWM
 
-# オンボードLED（’LED’という名前が使えている前提）
-led = Pin('LED', Pin.OUT)
+# ========================================
+# DRV8835 モータードライバ接続 (IN/INモード)
+# ========================================
+# Pico W          DRV8835
+# GPIO15 (Pin20) → AIN1 (正転PWM)
+# GPIO14 (Pin19) → AIN2 (逆転PWM)
+# 3.3V (Pin36)   → VCC (ロジック電源)
+# GND            → MODE (IN/INモード設定)
+# GND            → GND (共通GND)
+# 
+# バッテリー      DRV8835
+# 7.2V+          → VM (モーター電源)
+# 7.2V-          → GND
+# 
+# DRV8835        モーター
+# AOUT1          → モーター+
+# AOUT2          → モーター-
+# ========================================
 
-SSID = 'Pico2W_SliderUI'
-PASSWORD = 'slider1234'
-REQUEST_CHECK_INTERVAL = 0.05  # HTTPリクエストチェック間隔(秒) ※応答性とCPU負荷のバランス調整用
+motor_ain1 = PWM(Pin(15))  # 正転用PWM (GPIO15)
+motor_ain2 = PWM(Pin(14))  # 逆転用PWM (GPIO14)
+motor_ain1.freq(1000)      # PWM周波数 1kHz
+motor_ain2.freq(1000)
+
+SSID = 'Pico2W_MotorUI'
+PASSWORD = 'motor1234'
+REQUEST_CHECK_INTERVAL = 0.05  # HTTPリクエストチェック間隔(秒)
 
 def web_page(current_value):
     # HTMLファイルを読み込んで値を埋め込む
@@ -48,80 +69,77 @@ def start_server():
     return s
 
 # 初期設定
-current_val = 0       # スライダー初期値を 0（左端）
-delay_time = None     # 待ち時間変数。初期は消灯モードとして None
+current_val = 0       # スライダー初期値を 0（停止）
 server = None
 
-def update_delay_from_val(val):
-    global delay_time
+def update_motor_from_val(val):
+    """
+    スライダー値(-100～100)からモーターのPWM duty値を設定
+    -100～-1: 逆転(速度可変)
+    0: 停止
+    1～100: 正転(速度可変)
+    """
     v = int(val)
-    if v <= 0:
-        # 消灯モード
-        delay_time = None
-    elif v >= 100:
-        # 点灯しっぱなしモード
-        delay_time = 0
+    
+    if v == 0:
+        # 停止 (両方Low)
+        motor_ain1.duty_u16(0)
+        motor_ain2.duty_u16(0)
+        print("Motor: STOP")
+    elif v > 0:
+        # 正転 (AIN1=PWM, AIN2=Low)
+        duty = int((v / 100) * 65535)
+        motor_ain1.duty_u16(duty)
+        motor_ain2.duty_u16(0)
+        print(f"Motor: FORWARD {v}% (duty={duty})")
     else:
-        # 中間値：スライダー値 v に応じて待ち時間を決定
-        delay_time = (100 - v) * 0.02  # 係数0.02秒を使用
-    print("Updated delay_time:", delay_time)
+        # 逆転 (AIN1=Low, AIN2=PWM)
+        duty = int((abs(v) / 100) * 65535)
+        motor_ain1.duty_u16(0)
+        motor_ain2.duty_u16(duty)
+        print(f"Motor: REVERSE {abs(v)}% (duty={duty})")
+
+
 
 def serve_requests():
     global current_val, server
     try:
         conn, addr = server.accept()
         print('Client connected from', addr)
-        request = conn.recv(1024).decode('utf‑8')
+        request = conn.recv(1024).decode('utf-8')
         print('Request =', request)
         if 'GET /?value=' in request:
             val_str = request.split('value=')[1].split(' ')[0]
             val = int(val_str)
             print('New slider value:', val)
             current_val = val
-            update_delay_from_val(val)
+            update_motor_from_val(val)
         response = web_page(current_val)
-        conn.send('HTTP/1.1 200 OK\r\nContent‑Type: text/html; charset=utf-8\r\n\r\n')
+        conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n')
         conn.send(response)
         conn.close()
     except OSError:
         # タイムアウト／接続なし／その他 → 継続
         pass
-
-def sleep_with_serve(duration):
-    """指定時間sleepしながら定期的にHTTPリクエストを処理"""
-    if duration <= 0:
-        return
-    end_time = time.ticks_add(time.ticks_ms(), int(duration * 1000))
-    while time.ticks_diff(end_time, time.ticks_ms()) > 0:
-        serve_requests()
-        time.sleep(REQUEST_CHECK_INTERVAL)  # 定期的にリクエストをチェック
+    except Exception as e:
+        print(f"Error: {e}")
+        pass
 
 def main():
-    global server, current_val, delay_time
-    # 初期状態：LED消灯
-    led.value(0)
+    global server, current_val
+    # 初期状態：モーター停止
+    motor_ain1.duty_u16(0)
+    motor_ain2.duty_u16(0)
+    
     start_ap()
     server = start_server()
-    print("Starting main loop")
-    update_delay_from_val(current_val)
+    print("Starting main loop - Motor control mode (Forward/Reverse)")
+    update_motor_from_val(current_val)
+    
     while True:
-        # 受信チェック（短くループさせる）
+        # HTTPリクエストを処理（PWMはハードウェアで自動動作）
         serve_requests()
-        # LED 制御部分
-        if delay_time is None:
-            # 消灯モード：LED OFF、短時間待って次回チェック
-            led.value(0)
-            sleep_with_serve(0.1)
-        elif delay_time == 0:
-            # 点灯モード：LED ON、短時間待って次回チェック
-            led.value(1)
-            sleep_with_serve(0.1)
-        else:
-            # 点滅モード：周期に合わせて ON/OFF
-            led.value(1)
-            sleep_with_serve(delay_time / 2)
-            led.value(0)
-            sleep_with_serve(delay_time / 2)
+        time.sleep(REQUEST_CHECK_INTERVAL)
 
 if __name__ == "__main__":
     main()

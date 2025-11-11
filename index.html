@@ -2,8 +2,8 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pico2W LED 点滅速度制御</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Pico2W モーター制御</title>
   <style>
     body {
       margin: 0;
@@ -12,17 +12,21 @@
       background-color: #f0f0f0;
       color: #333;
       height: 100vh;
+      height: 100dvh; /* モバイルブラウザ対応 */
       width: 100vw;
       overflow: hidden;
+      position: fixed; /* スクロール防止 */
     }
     .container {
       width: 100%;
       height: 100%;
       background: #fff;
       padding: 16px;
+      padding-bottom: max(16px, env(safe-area-inset-bottom)); /* ノッチ対応 */
       box-sizing: border-box;
       display: flex;
       flex-direction: column;
+      overflow: hidden;
     }
     h1 {
       font-size: 1.4em;
@@ -65,6 +69,12 @@
       writing-mode: bt-lr; /* IE */
       -webkit-appearance: slider-vertical; /* WebKit */
       appearance: slider-vertical;
+      /* モバイル対応の追加スタイル */
+      touch-action: none;
+    }
+    /* Firefoxモバイル対応 */
+    input[type="range"]::-moz-range-track {
+      width: 32px;
     }
     .limiter-overlay {
       position: absolute;
@@ -72,7 +82,7 @@
       transform: translateX(-16px);
       width: 32px;
       top: 0;
-      height: 54.17%;
+      height: 27%; /* -100～100の範囲で46～100をグレーアウト (54/200 = 27%) */
       background: rgba(200, 200, 200, 0.6);
       pointer-events: none;
       display: none;
@@ -84,7 +94,7 @@
       position: absolute;
       left: 50%;
       margin-left: 40px;
-      top: 54.17%;
+      top: 27%; /* 46%の位置 */
       transform: translateY(-50%);
       font-size: 0.9em;
       color: #0066cc;
@@ -98,8 +108,6 @@
     .limiter-control {
       display: flex;
       align-items: center;
-      justify-content: center;
-      margin: 10px 0;
       font-size: 1.1em;
     }
     .limiter-control input[type="checkbox"] {
@@ -109,6 +117,13 @@
     }
     .limiter-control label {
       cursor: pointer;
+      user-select: none;
+    }
+    .checkbox-group {
+      display: flex;
+      justify-content: center;
+      gap: 30px;
+      margin: 10px 0;
     }
     .value-display {
       font-size: 1.2em;
@@ -145,41 +160,46 @@
 </head>
 <body>
   <div class="container">
-    <h1>Pico2W 速度制御</h1>
-    <div class="limiter-control">
-      <input type="checkbox" id="limiter" checked onchange="toggleLimiter(this.checked)">
-      <label for="limiter">リミッター</label>
+    <h1>Pico2W モーター制御</h1>
+    <div class="checkbox-group">
+      <div class="limiter-control">
+        <input type="checkbox" id="limiter" checked onchange="toggleLimiter(this.checked)">
+        <label for="limiter">リミッター</label>
+      </div>
+      <div class="limiter-control">
+        <input type="checkbox" id="reverseEnable" onchange="toggleReverse(this.checked)">
+        <label for="reverseEnable">バック(逆転)許可</label>
+      </div>
     </div>
-    <p class="value-display">出力値: <input type="number" id="valDisplay" class="value-input" value="0" min="0" max="100" oninput="updateFromInput(this.value)" /><span id="maxLabel" class="max-label">MAX!!!</span></p>
+    <p class="value-display">出力値: <input type="number" id="valDisplay" class="value-input" value="0" min="-100" max="100" oninput="updateFromInput(this.value)" /><span id="maxLabel" class="max-label">MAX!!!</span>％</p>
     <div class="slider-group">
       <input type="range" id="slider" min="0" max="100" value="0"
              oninput="updateValue(this.value)" />
       <div class="limiter-overlay" id="limiterOverlay"></div>
       <div class="limiter-label" id="limiterLabel">リミッター 3.3V/46%</div>
-      <div class="slider-scale">
+      <div class="slider-scale" id="sliderScale">
         <div class="scale-mark">100<span class="voltage-label" id="maxVoltage"></span></div>
-        <div class="scale-mark">90</div>
         <div class="scale-mark">80</div>
-        <div class="scale-mark">70</div>
         <div class="scale-mark">60</div>
-        <div class="scale-mark">50</div>
         <div class="scale-mark">40</div>
-        <div class="scale-mark">30</div>
         <div class="scale-mark">20</div>
-        <div class="scale-mark">10</div>
         <div class="scale-mark">0</div>
       </div>
     </div>
     <script>
       const MAX_LIMIT = 46; // リミッター有効時の上限値(3.3V相当)
       let limiterEnabled = true; // デフォルトでリミッター有効
+      let reverseEnabled = false; // デフォルトでバック無効
       
       // ページ読み込み時にリミッターを有効化
       window.onload = function() {
         toggleLimiter(true);
+        toggleReverse(false);
       };
       
       function updateValue(val) {
+        val = parseInt(val); // 文字列を数値に変換
+        
         // リミッター有効時は上限チェック
         if (limiterEnabled && val > MAX_LIMIT) {
           val = MAX_LIMIT;
@@ -219,11 +239,17 @@
           return; // 数値でない場合は何もしない
         }
         
+        // バック無効時は負の値を0にする
+        if (!reverseEnabled && val < 0) {
+          val = 0;
+        }
+        
         // 範囲制限
-        if (val < 0) val = 0;
+        let minVal = reverseEnabled ? -100 : 0;
+        if (val < minVal) val = minVal;
         if (val > 100) val = 100;
         
-        // リミッター有効時の上限チェック
+        // リミッター有効時の上限チェック (正方向のみ制限)
         if (limiterEnabled && val > MAX_LIMIT) {
           val = MAX_LIMIT;
         }
@@ -247,6 +273,68 @@
         var xhr = new XMLHttpRequest();
         xhr.open('GET', '/?value=' + val, true);
         xhr.send();
+      }
+      
+      function toggleReverse(enabled) {
+        reverseEnabled = enabled;
+        const slider = document.getElementById('slider');
+        const valDisplay = document.getElementById('valDisplay');
+        const sliderScale = document.getElementById('sliderScale');
+        const overlay = document.getElementById('limiterOverlay');
+        const limiterLabel = document.querySelector('.limiter-label');
+        
+        if (enabled) {
+          // バック許可: -100～100
+          slider.min = -100;
+          slider.max = 100;
+          valDisplay.min = -100;
+          sliderScale.innerHTML = `
+            <div class="scale-mark">100<span class="voltage-label" id="maxVoltage"></span></div>
+            <div class="scale-mark">80</div>
+            <div class="scale-mark">60</div>
+            <div class="scale-mark">40</div>
+            <div class="scale-mark">20</div>
+            <div class="scale-mark">0</div>
+            <div class="scale-mark">-20</div>
+            <div class="scale-mark">-40</div>
+            <div class="scale-mark">-60</div>
+            <div class="scale-mark">-80</div>
+            <div class="scale-mark">-100</div>
+          `;
+          // リミッター位置を-100～100モード用に調整 (46～100を制限: 54/200 = 27%)
+          overlay.style.height = '27%';
+          overlay.style.top = '0';
+          if (limiterLabel) {
+            limiterLabel.style.top = '27%';
+          }
+        } else {
+          // バック無効: 0～100
+          slider.min = 0;
+          slider.max = 100;
+          valDisplay.min = 0;
+          sliderScale.innerHTML = `
+            <div class="scale-mark">100<span class="voltage-label" id="maxVoltage"></span></div>
+            <div class="scale-mark">80</div>
+            <div class="scale-mark">60</div>
+            <div class="scale-mark">40</div>
+            <div class="scale-mark">20</div>
+            <div class="scale-mark">0</div>
+          `;
+          // リミッター位置を0～100モード用に調整 (46～100を制限: 54/100 = 54%)
+          overlay.style.height = '54%';
+          overlay.style.top = '0';
+          if (limiterLabel) {
+            limiterLabel.style.top = '54%';
+          }
+          // 現在値が負の場合は0にリセット
+          if (parseInt(slider.value) < 0) {
+            slider.value = 0;
+            updateValue(0);
+          }
+        }
+        
+        // リミッター表示を更新
+        toggleLimiter(limiterEnabled);
       }
       
       function toggleLimiter(enabled) {
