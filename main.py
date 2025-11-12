@@ -4,28 +4,37 @@ import time
 from machine import Pin, PWM
 
 # ========================================
-# DRV8835 モータードライバ接続 (IN/INモード)
+# TB6612 モータードライバ接続
 # ========================================
-# Pico W          DRV8835
-# GPIO15 (Pin20) → AIN1 (正転PWM)
-# GPIO14 (Pin19) → AIN2 (逆転PWM)
+# Pico W          TB6612
+# GPIO15 (Pin20) → AIN1 (方向制御1)
+# GPIO14 (Pin19) → AIN2 (方向制御2)
+# GPIO13 (Pin17) → PWMA (速度制御PWM)
 # 3.3V (Pin36)   → VCC (ロジック電源)
-# GND            → MODE (IN/INモード設定)
+# 3.3V (Pin36)   → STBY (スタンバイ解除: Highで動作)
 # GND            → GND (共通GND)
 # 
-# バッテリー      DRV8835
+# バッテリー      TB6612
 # 7.2V+          → VM (モーター電源)
 # 7.2V-          → GND
 # 
-# DRV8835        モーター
-# AOUT1          → モーター+
-# AOUT2          → モーター-
+# TB6612         モーター
+# AO1            → モーター+
+# AO2            → モーター-
+# 
+# 制御ロジック:
+# AIN1 | AIN2 | PWMA | 動作
+# -----|------|------|--------
+#  H   |  L   | PWM  | 正転
+#  L   |  H   | PWM  | 逆転
+#  L   |  L   |  -   | ブレーキ
+#  H   |  H   |  -   | ブレーキ
 # ========================================
 
-motor_ain1 = PWM(Pin(15))  # 正転用PWM (GPIO15)
-motor_ain2 = PWM(Pin(14))  # 逆転用PWM (GPIO14)
-motor_ain1.freq(1000)      # PWM周波数 1kHz
-motor_ain2.freq(1000)
+motor_ain1 = Pin(15, Pin.OUT)  # 方向制御1 (GPIO15)
+motor_ain2 = Pin(14, Pin.OUT)  # 方向制御2 (GPIO14)
+motor_pwm = PWM(Pin(13))       # 速度制御PWM (GPIO13)
+motor_pwm.freq(1000)           # PWM周波数 1kHz
 
 SSID = 'Pico2W_MotorUI'
 PASSWORD = 'motor1234'
@@ -75,28 +84,35 @@ server = None
 def update_motor_from_val(val):
     """
     スライダー値(-100～100)からモーターのPWM duty値を設定
+    TB6612制御:
+    - AIN1/AIN2で方向を制御
+    - PWMAで速度を制御
+    
     -100～-1: 逆転(速度可変)
-    0: 停止
+    0: ブレーキ
     1～100: 正転(速度可変)
     """
     v = int(val)
     
     if v == 0:
-        # 停止 (両方Low)
-        motor_ain1.duty_u16(0)
-        motor_ain2.duty_u16(0)
-        print("Motor: STOP")
+        # ブレーキ (AIN1=Low, AIN2=Low, PWM=0)
+        motor_ain1.value(0)
+        motor_ain2.value(0)
+        motor_pwm.duty_u16(0)
+        print("Motor: BRAKE")
     elif v > 0:
-        # 正転 (AIN1=PWM, AIN2=Low)
+        # 正転 (AIN1=High, AIN2=Low, PWM=速度)
+        motor_ain1.value(1)
+        motor_ain2.value(0)
         duty = int((v / 100) * 65535)
-        motor_ain1.duty_u16(duty)
-        motor_ain2.duty_u16(0)
+        motor_pwm.duty_u16(duty)
         print(f"Motor: FORWARD {v}% (duty={duty})")
     else:
-        # 逆転 (AIN1=Low, AIN2=PWM)
+        # 逆転 (AIN1=Low, AIN2=High, PWM=速度)
+        motor_ain1.value(0)
+        motor_ain2.value(1)
         duty = int((abs(v) / 100) * 65535)
-        motor_ain1.duty_u16(0)
-        motor_ain2.duty_u16(duty)
+        motor_pwm.duty_u16(duty)
         print(f"Motor: REVERSE {abs(v)}% (duty={duty})")
 
 
@@ -127,13 +143,14 @@ def serve_requests():
 
 def main():
     global server, current_val
-    # 初期状態：モーター停止
-    motor_ain1.duty_u16(0)
-    motor_ain2.duty_u16(0)
+    # 初期状態：モーターブレーキ
+    motor_ain1.value(0)
+    motor_ain2.value(0)
+    motor_pwm.duty_u16(0)
     
     start_ap()
     server = start_server()
-    print("Starting main loop - Motor control mode (Forward/Reverse)")
+    print("Starting main loop - Motor control mode (Forward/Reverse) - TB6612")
     update_motor_from_val(current_val)
     
     while True:
