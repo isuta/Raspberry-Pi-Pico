@@ -1,107 +1,220 @@
-# FS90R 連続回転サーボモーターの制御サンプルコード
-# Raspberry Pi Pico W / MicroPython
-
+import network
+import socket
+import time
 from machine import Pin, PWM
-import utime
 
-# --- 制御定数（50Hz / 1.5ms 基準） ---
-SERVO_PIN = 15          # FS90Rの信号線(オレンジ)をGP15に接続
-FREQUENCY = 50          # サーボの標準周波数 50 Hz (周期 20ms)
-DUTY_CYCLE_RANGE = 65535 # Pico PWMの最大値 (16ビット)
+# ========================================
+# TB6612 モータードライバ接続
+# ========================================
+# Pico W          TB6612
+# GPIO15 (Pin20) → AIN1 (方向制御1)
+# GPIO14 (Pin19) → AIN2 (方向制御2)
+# GPIO13 (Pin17) → PWMA (速度制御PWM)
+# 3.3V (Pin36)   → VCC (ロジック電源)
+# 3.3V (Pin36)   → STBY (スタンバイ解除: Highで動作)
+# GND            → GND (共通GND)
+# 
+# バッテリー      TB6612
+# 7.2V+          → VM (モーター電源)
+# 7.2V-          → GND
+# 
+# TB6612         モーター
+# AO1            → モーター+
+# AO2            → モーター-
+# 
+# 制御ロジック:
+# AIN1 | AIN2 | PWMA | 動作
+# -----|------|------|--------
+#  H   |  L   | PWM  | 正転
+#  L   |  H   | PWM  | 逆転
+#  L   |  L   |  -   | ブレーキ
+#  H   |  H   |  -   | ブレーキ
+# ========================================
 
-# 基準パルス幅 (Duty Cycle) の計算: Duty = (パルス幅[us] / 20000[us]) * 65535
-# 停止パルス: 1500us (約 4915)
-# 最大逆転パルス: 1000us (約 3277)
-# 最大正転パルス: 2000us (約 6554)
+# 定数定義
+PWM_MAX = 65535      # PWM最大値
+PWM_FREQ = 1000      # PWM周波数(Hz)
+MOTOR_MIN = -100     # モーター速度最小値
+MOTOR_MAX = 100      # モーター速度最大値
+DEBUG = False        # デバッグログ有効/無効
 
-# ⚠️ 注意: 停止点(NEUTRAL_DUTY)は個体差があるため、動作を見ながら微調整が必要です。
-NEUTRAL_DUTY = 4915     # 停止 (1.5ms)
-MAX_FORWARD_DUTY = 6554 # 正転の最大速度 (2.0ms)
-MAX_REVERSE_DUTY = 3277 # 逆転の最大速度 (1.0ms)
+motor_ain1 = Pin(15, Pin.OUT)  # 方向制御1 (GPIO15)
+motor_ain2 = Pin(14, Pin.OUT)  # 方向制御2 (GPIO14)
+motor_pwm = PWM(Pin(13))       # 速度制御PWM (GPIO13)
+motor_pwm.freq(PWM_FREQ)
 
-# PWM設定
-servo_pwm = PWM(Pin(SERVO_PIN))
-servo_pwm.freq(FREQUENCY)
+SSID = 'Pico2W_MotorUI'
+PASSWORD = 'motor1234'
 
-def set_servo_speed(speed_percent):
-    """
-    サーボの速度と方向を設定します。
+# グローバル変数
+current_val = 0
+
+# --------------------------------------------
+# HTMLテンプレート（メモリ効率化: 圧縮版）
+# --------------------------------------------
+HTML_TEMPLATE = """<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pico2W Motor</title><style>body{{font-family:Arial,sans-serif;text-align:center;margin-top:50px}}.status{{font-size:24px;font-weight:bold;margin:20px 0}}.buttons button{{padding:15px 30px;margin:10px;font-size:18px;cursor:pointer;border:none;border-radius:8px;width:120px}}.forward{{background-color:#4CAF50;color:white}}.brake{{background-color:#f44336;color:white}}</style></head><body><h1>Pico2W TB6612</h1><div class="status">現在値: <span>{current_val}</span>% ({direction})</div><div class="buttons"><form action="/speed/100" method="get"><button class="forward" type="submit">全速</button></form><form action="/speed/80" method="get"><button class="forward" type="submit">高速</button></form><form action="/speed/60" method="get"><button class="forward" type="submit">中速</button></form><form action="/speed/40" method="get"><button class="forward" type="submit">低速</button></form><form action="/speed/20" method="get"><button class="forward" type="submit">微速</button></form><form action="/speed/0" method="get"><button class="brake" type="submit">停止</button></form></div></body></html>"""
+
+# --------------------------------------------
+# 1. HTML生成関数
+# --------------------------------------------
+
+def web_page(val):
+    """現在のモーター値に基づいたHTMLページを生成する（最適化版）"""
+    # 方向判定を簡素化
+    if val > 0:
+        direction = "正転"
+    elif val == 0:
+        direction = "ブレーキ"
+    else:
+        direction = "逆転"
     
-    Args:
-        speed_percent (int): -100 (最大逆転) から 100 (最大正転) の間の値。
-                              0 は停止を意味します。
+    return HTML_TEMPLATE.format(current_val=abs(val), direction=direction)
+
+# --------------------------------------------
+# 2. モーター制御関数 (変更なし)
+# --------------------------------------------
+
+def update_motor_from_val(val):
     """
-    if speed_percent > 100:
-        speed_percent = 100
-    elif speed_percent < -100:
-        speed_percent = -100
-
-    if speed_percent == 0:
-        duty = NEUTRAL_DUTY
-    elif speed_percent > 0:
-        # 正転 (NEUTRAL_DUTY から MAX_FORWARD_DUTY へ線形補間)
-        # 0% -> NEUTRAL_DUTY, 100% -> MAX_FORWARD_DUTY
-        duty = int(NEUTRAL_DUTY + (MAX_FORWARD_DUTY - NEUTRAL_DUTY) * (speed_percent / 100))
-    else: # speed_percent < 0
-        # 逆転 (NEUTRAL_DUTY から MAX_REVERSE_DUTY へ線形補間)
-        # 0% -> NEUTRAL_DUTY, -100% -> MAX_REVERSE_DUTY
-        duty = int(NEUTRAL_DUTY + (MAX_REVERSE_DUTY - NEUTRAL_DUTY) * (-speed_percent / 100))
-    
-    servo_pwm.duty_u16(duty)
-    # print(f"速度: {speed_percent}%, Duty: {duty}") # 連続実行時は出力を抑制
-
-def stop_servo():
-    """サーボを停止させます。"""
-    set_servo_speed(0)
-    print(f"--- 停止 (Duty: {NEUTRAL_DUTY}) ---")
-
-
-def rotate_for_duration(speed_percent, duration_seconds):
+    スライダー値(-100～100)からモーターのPWM duty値を設定（最適化版）
     """
-    指定した速度で、指定した時間だけサーボを回転させます。
+    v = int(val)
     
-    Args:
-        speed_percent (int): -100 (最大逆転) から 100 (最大正転) の間の値。
-        duration_seconds (float): 回転させる時間（秒）。
-    """
-    if duration_seconds <= 0:
-        stop_servo()
-        return
-
-    print(f"回転開始: 速度 {speed_percent}% で {duration_seconds} 秒間...")
-    set_servo_speed(speed_percent)
-    utime.sleep(duration_seconds)
-    stop_servo()
-    print(f"回転完了。")
-
-# --- 動作デモ ---
-try:
-    print("--- FS90R 時間制御デモ開始 ---")
+    # 範囲チェック（クランプ処理）
+    if v < MOTOR_MIN or v > MOTOR_MAX:
+        if not DEBUG:  # デバッグ無効時は警告を省略
+            v = max(MOTOR_MIN, min(MOTOR_MAX, v))
+        else:
+            print(f"Warning: {v} clamped to [{MOTOR_MIN}, {MOTOR_MAX}]")
+            v = max(MOTOR_MIN, min(MOTOR_MAX, v))
     
-    # 1. 停止 (2秒間)
-    stop_servo()
-    utime.sleep(2)
+    # モーター制御（最適化: 条件分岐を簡素化）
+    if v == 0:
+        motor_ain1.value(0)
+        motor_ain2.value(0)
+        motor_pwm.duty_u16(0)
+        if DEBUG:
+            print(f"Motor: BRAKE")
+    else:
+        # duty計算を先に実行（正転/逆転共通）
+        duty = int((abs(v) * PWM_MAX) // 100)  # 浮動小数点演算を整数演算に変更
+        
+        if v > 0:
+            # 正転
+            motor_ain1.value(1)
+            motor_ain2.value(0)
+        else:
+            # 逆転
+            motor_ain1.value(0)
+            motor_ain2.value(1)
+        
+        motor_pwm.duty_u16(duty)
+        if DEBUG:
+            print(f"Motor: {'FWD' if v > 0 else 'REV'} {abs(v)}% (duty={duty})")
 
-    # 2. 正転 (50% の速度で 1.5 秒間回転させる = 約 N 回転)
-    # 角度制御の代用として「時間」で回転量を制御します。
-    rotate_for_duration(speed_percent=50, duration_seconds=1.5)
-    utime.sleep(1) # 次の動作までの待機
+# --------------------------------------------
+# 3. AP/サーバー設定 (変更なし)
+# --------------------------------------------
 
-    # 3. 逆転 (30% の速度で 3.0 秒間回転させる)
-    rotate_for_duration(speed_percent=-30, duration_seconds=3.0)
-    utime.sleep(1) # 次の動作までの待機
+def start_ap():
+    ap = network.WLAN(network.AP_IF)
+    ap.active(False)
+    time.sleep(0.1)
+    ap.config(essid=SSID, password=PASSWORD)
+    ap.active(True)
+    while not ap.active():
+        time.sleep(0.1)
+    print('AP mode started')
+    print('SSID:', SSID)
+    print('IP address:', ap.ifconfig()[0])
+    return ap
 
-    # 4. 最大速度での短時間回転 (素早い動きのデモ)
-    rotate_for_duration(speed_percent=100, duration_seconds=0.3)
-    utime.sleep(1)
+def start_server():
+    addr = socket.getaddrinfo('0.0.0.0', 80)[0][-1]
+    s = socket.socket()
+    s.bind(addr)
+    s.listen(1)
+    print('Listening on', addr)
+    return s
 
-    # 5. 最終停止
-    print("5. 最終停止。")
-    stop_servo()
+# --------------------------------------------
+# 4. リクエスト処理関数 (固定パスのルーティングに修正)
+# --------------------------------------------
 
-except KeyboardInterrupt:
-    print("ユーザーによる停止。")
-finally:
-    stop_servo()
-    servo_pwm.deinit() # PWMリソースを解放
-    print("--- 制御デモ終了 ---")
+def serve_requests(s):
+    global current_val
+    
+    while True:
+        conn = None
+        try:
+            conn, addr = s.accept()
+            if DEBUG:
+                print('Client:', addr)
+            
+            # バッファサイズ削減: 1024 -> 256バイト（HTTPリクエスト行のみ取得）
+            request = conn.recv(256).decode('utf-8')
+            
+            # 最初の行のみを取得（メモリ効率化）
+            first_line = request.split('\r\n', 1)[0]
+            if DEBUG:
+                print('Request:', first_line)
+
+            # ルーティング処理（バイトレベル最適化）
+            if 'GET /speed/' in first_line:
+                try:
+                    # パスから数値を取得: 'GET /speed/100 HTTP/1.1' -> '100'
+                    # split()を最小限に抑える
+                    start = first_line.find('/speed/') + 7  # '/speed/'の長さ
+                    end = first_line.find(' ', start)
+                    val_str = first_line[start:end] if end > 0 else first_line[start:]
+                    
+                    # クエリパラメータ除去
+                    if '?' in val_str:
+                        val_str = val_str[:val_str.find('?')]
+                    
+                    val = int(val_str)
+                    current_val = val
+                    update_motor_from_val(val)
+                except (ValueError, IndexError):
+                    if DEBUG:
+                        print(f"Invalid speed value")
+            
+            # 応答処理（ヘッダー簡略化）
+            response = web_page(current_val)
+            conn.send(b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n')
+            conn.sendall(response.encode('utf-8'))
+            
+        except OSError:
+            if DEBUG:
+                print("Socket error")
+        except Exception:
+            if DEBUG:
+                print("Unexpected error")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+
+# --------------------------------------------
+# メイン処理 (変更なし)
+# --------------------------------------------
+
+def main():
+    global server, current_val
+    # 初期状態：モーターブレーキ
+    motor_ain1.value(0)
+    motor_ain2.value(0)
+    motor_pwm.duty_u16(0)
+    
+    start_ap()
+    server = start_server()
+    print("Starting main loop - Synchronous Motor control mode (Fixed Path Mode)")
+    update_motor_from_val(current_val)
+    
+    serve_requests(server)
+
+if __name__ == "__main__":
+    main()
+
